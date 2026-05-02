@@ -1,88 +1,109 @@
 # bob_prompts.py — watsonx.ai prompt templates for CIE
+# Optimised for ibm/granite-3-8b-instruct model
 
 def map_prompt(repo_url: str, file_tree: list, key_files: dict) -> str:
     """Prompt to generate module map JSON from repo"""
-    file_tree_str  = "\n".join(file_tree)
-    key_files_str  = "\n\n".join([
-        f"=== {path} ===\n{content}"
-        for path, content in key_files.items()
+    file_tree_str = "\n".join(file_tree[:50])  # limit to 50 files
+    key_files_str = "\n\n".join([
+        f"FILE: {path}\n{content[:500]}"
+        for path, content in list(key_files.items())[:10]
     ])
 
-    return f"""You are analysing the GitHub repository: {repo_url}
+    return f"""You are a code analysis AI. Analyze the structure of this GitHub repository: {repo_url}
 
-FILE TREE:
+FILE TREE (all files in repo):
 {file_tree_str}
 
-KEY FILE CONTENTS:
+KEY FILE CONTENTS (sample files):
 {key_files_str}
 
-Your task: Analyse the repository structure and return a module map.
+TASK: Create a module map showing how this codebase is organized.
 
-Rules:
-- Group files by feature/module, not by file type
-- Identify entry points, services, utilities, tests, and config files
-- Identify which modules import or depend on each other
-- Use short, human-readable labels for module names
-- Module IDs must be unique lowercase strings with no spaces
+Instructions:
+1. Group related files into logical modules (e.g., "auth", "api", "database")
+2. Identify module types: entry (main files), service (business logic), util (helpers), test, config
+3. Identify dependencies between modules (which imports which)
+4. Use lowercase IDs with no spaces (e.g., "user_service")
 
-Return ONLY a valid JSON object with this exact schema.
-No explanation. No markdown. No extra text. Just the JSON:
+CRITICAL: You MUST respond with ONLY valid JSON. No text before or after. Start with {{ and end with }}.
 
+Required JSON format:
 {{
   "modules": [
     {{
-      "id": "string",
-      "label": "string",
-      "files": ["string"],
-      "type": "entry|service|util|test|config"
+      "id": "backend",
+      "label": "Backend API",
+      "files": ["cie-backend/main.py", "cie-backend/github_helper.py"],
+      "type": "service"
     }}
   ],
   "edges": [
     {{
-      "from": "moduleId",
-      "to": "moduleId",
-      "type": "import|extends|calls"
+      "from": "backend",
+      "to": "frontend",
+      "type": "import"
     }}
   ]
-}}"""
+}}
+
+DO NOT include any explanation, markdown, or code blocks. ONLY the JSON object."""
 
 
 def impact_prompt(repo_url: str, function_name: str, file_path: str, key_files: dict) -> str:
     """Prompt to analyse impact of changing a specific function"""
+    
+    # Count how many files we have
+    file_count = len(key_files)
+    
     key_files_str = "\n\n".join([
-        f"=== {path} ===\n{content}"
+        f"=== FILE: {path} ===\n{content}"
         for path, content in key_files.items()
     ])
 
-    return f"""You are a senior engineer analysing the codebase: {repo_url}
+    return f"""You are analyzing the impact of modifying '{function_name}' in {file_path} from repository {repo_url}.
 
-The developer wants to modify this function:
-- Function name: {function_name}
-- Located in: {file_path}
+I am providing you with {file_count} files from the codebase. Search through ALL of them carefully.
 
-CODEBASE CONTEXT:
+CODEBASE FILES ({file_count} files):
 {key_files_str}
 
-Your task: Trace all dependencies and callers of this function across the codebase.
+ANALYSIS TASK:
 
-Rules:
-- Only reference files that actually exist in the codebase context above
-- Be specific — use real file paths and line numbers where visible
-- Risk level: low (isolated util), medium (shared service), high (core/entry point)
-- affectedModuleIds must match module IDs that would appear in the codebase map
+Step 1: Find where '{function_name}' is DEFINED
+- Look in {file_path} for the function definition
 
-Return ONLY a valid JSON object. No explanation. No markdown. Just the JSON:
+Step 2: Find DIRECT CALLERS
+- Search for lines that call {function_name}() or use {function_name}
+- Look for: {function_name}(, .{function_name}(, import {function_name}
+- Record the file path and approximate line number
+
+Step 3: Find INDIRECT DEPENDENTS
+- Find files that import the file containing {function_name}
+- These files depend on it indirectly
+
+Step 4: Find TEST FILES
+- Look for files with "test" in the name
+- Check if they import or test {function_name}
+
+Step 5: Assess RISK LEVEL
+- high: Core function used in many places or entry points
+- medium: Shared utility used in several places
+- low: Isolated function with few callers
+
+IMPORTANT: Even if you find just ONE caller, include it! Don't return empty arrays unless you truly found nothing.
+
+CRITICAL: Respond with ONLY valid JSON. Start with {{ and end with }}.
 
 {{
-  "directCallers": [
-    {{"file": "string", "line": 0}}
-  ],
-  "indirectDependents": ["string"],
-  "testsCovering": ["string"],
-  "riskLevel": "low|medium|high",
-  "riskReason": "string (max 20 words)",
-  "affectedModuleIds": ["string"]
-}}"""
+  "directCallers": [{{"file": "lib/application.js", "line": 136}}],
+  "indirectDependents": ["lib/express.js"],
+  "testsCovering": ["test/router.test.js"],
+  "riskLevel": "high",
+  "riskReason": "Core routing function called by application layer",
+  "affectedModuleIds": ["router", "app"]
+}}
+
+DO NOT include explanations, markdown, or code blocks. ONLY the JSON object."""
 
 
 def generate_prompt(file_path: str, file_content: str, mode: str, framework: str) -> str:

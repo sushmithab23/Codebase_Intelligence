@@ -156,3 +156,45 @@ Return the generated code only.
 No explanation before or after.
 No markdown code fences.
 Just the raw code."""
+
+def flow_prompt(repo_url: str, file_tree: list, key_files: dict) -> str:
+    file_tree_str = "\n".join(file_tree[:30])
+    top_files = dict(list(key_files.items())[:5])
+    key_files_str = "\n\n".join([
+        f"=== {path} ===\n{content[:1000]}"
+        for path, content in top_files.items()
+    ])
+
+    return f"""You are analysing the runtime flow of this application: {repo_url}
+
+FILE TREE:
+{file_tree_str}
+
+KEY FILE CONTENTS:
+{key_files_str}
+
+Your task: Map the ACTUAL EXECUTION FLOW of this application.
+Show how a request or user action travels through the code from start to finish.
+
+Think like a developer tracing a debugger:
+- Where does the application START? (main function, server startup, entry route)
+- What are the KEY USER ACTIONS or API ROUTES? (login, dashboard load, data fetch)
+- What FUNCTIONS get called in sequence?
+- Where are DECISIONS made? (auth checks, validation, conditionals)
+- Where does execution END? (response sent, error returned)
+
+Rules:
+- Maximum 12 nodes — only the most important steps
+- Show the HAPPY PATH (success flow) as the main path
+- Show key FAILURE branches at decision points
+- Use real function names and file paths from the code above
+- Every node id must be unique lowercase with underscores
+
+CRITICAL INSTRUCTIONS:
+- Output ONLY valid JSON starting with {{ and ending with }}
+- No example output, no preamble, no explanation, no markdown
+- Your response must contain exactly ONE JSON object
+- The JSON must have a "flow" array and an "edges" array
+
+The JSON structure must follow this exact format:
+{{ "flow": [ {{ "id": "string", "label": "string", "type": "start|end|route|function|decision|process", "file": "string", "description": "string" }} ], "edges": [ {{ "from": "string", "to": "string", "label": "string" }} ] }}"""

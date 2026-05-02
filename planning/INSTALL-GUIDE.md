@@ -229,7 +229,6 @@ Open a **new terminal window** (keep the backend terminal for later).
 
 ### Both Windows and Mac
 ```bash
-cd cie-project
 npx create-react-app cie-frontend
 ```
 This takes 2-3 minutes. Say YES if it asks to install `create-react-app`.

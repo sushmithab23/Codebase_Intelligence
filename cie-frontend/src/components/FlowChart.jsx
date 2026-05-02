@@ -44,7 +44,7 @@ function shortFile(file, max = 28) {
 }
 
 export default function FlowChart({
-  nodes, edges, affectedIds, selectedId, onNodeClick, loadingImpact,
+  nodes, edges, affectedIds, selectedId, onNodeClick, loadingImpact, showLegend = true,
 }) {
   const svgRef  = useRef(null);
   const wrapRef = useRef(null);
@@ -331,6 +331,7 @@ export default function FlowChart({
   return (
     <div className="map-container" ref={wrapRef}>
       {/* Legend */}
+      {showLegend && (
       <div className="map-legend">
         {nodeTypes.map(type=>{
           const c=TYPE_CONFIG[type]||DEFAULT_CFG;
@@ -348,6 +349,7 @@ export default function FlowChart({
           </div>
         )}
       </div>
+    )}
 
       {loadingImpact&&(
         <div className="impact-overlay-msg">

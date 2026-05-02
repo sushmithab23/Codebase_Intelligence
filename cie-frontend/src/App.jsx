@@ -4,17 +4,16 @@ import GeneratePanel from "./components/GeneratePanel";
 import { getFlow, getImpact, generateContent, getFunctions } from "./api/cie";
 import "./App.css";
 
-const CACHE_KEY = "cie_flow_cache_v2";
+const CACHE_KEY = "cie_flow_v3";
 function loadCache() { try { return JSON.parse(sessionStorage.getItem(CACHE_KEY) || "{}"); } catch { return {}; } }
 function saveCache(c) { try { sessionStorage.setItem(CACHE_KEY, JSON.stringify(c)); } catch {} }
 
 const NAV = [
-  { id: "overview",  icon: "⊞", label: "Overview",         desc: "Stats & summary" },
-  { id: "map",       icon: "◎", label: "Codebase Map",     desc: "Visual flow map" },
-  { id: "impact",    icon: "⚡", label: "Impact Analysis",  desc: "What breaks if I change X?" },
-  { id: "docs",      icon: "◈", label: "Documentation",    desc: "Generate docs for any module" },
-  { id: "tests",     icon: "⬡", label: "Tests",            desc: "Generate tests for any module" },
-  { id: "search",    icon: "⊙", label: "Search",           desc: "Find modules by name" },
+  { id: "overview",  icon: "⊞", label: "Overview",        desc: "Stats & summary" },
+  { id: "map",       icon: "◎", label: "Codebase Map",    desc: "Visual flow map" },
+  { id: "impact",    icon: "⚡", label: "Impact Analysis", desc: "What breaks if I change X?" },
+  { id: "generate",  icon: "✦", label: "Generate",        desc: "Tests & docs for any module" },
+  { id: "search",    icon: "⊙", label: "Search",          desc: "Find modules by name" },
 ];
 
 export default function App() {
@@ -27,145 +26,124 @@ export default function App() {
   const [functions, setFunctions]       = useState([]);
   const [selectedFn, setSelectedFn]     = useState(null);
   const [activeNav, setActiveNav]       = useState("map");
+  const [chatTab, setChatTab]           = useState("ask");
   const [searchQuery, setSearchQuery]   = useState("");
-  const [autoMode, setAutoMode]         = useState(null); // "tests" | "docs" — auto-trigger on node click
-
-  // Chat state
-  const [chatMessages, setChatMessages] = useState([
-    { role: "bob", text: "Hi! Paste a GitHub URL above to get started. I'll map your entire codebase and help you understand it." }
-  ]);
-  const [chatInput, setChatInput]       = useState("");
+  const [autoMode, setAutoMode]         = useState(null);
   const [impactQuery, setImpactQuery]   = useState("");
   const [impactFile, setImpactFile]     = useState("");
+  const [loadingMap, setLoadingMap]     = useState(false);
+  const [loadingImpact, setLoadingImpact]       = useState(false);
+  const [loadingGenerate, setLoadingGenerate]   = useState(false);
+  const [loadingFunctions, setLoadingFunctions] = useState(false);
+  const [chatMessages, setChatMessages] = useState([
+    { role: "bob", text: "Hi! Paste a GitHub URL in the sidebar to get started. I'll map your entire codebase and help you understand it." }
+  ]);
+  const [chatInput, setChatInput] = useState("");
+  const [history, setHistory]     = useState([]);
 
-  const [loadingMap,       setLoadingMap]       = useState(false);
-  const [loadingImpact,    setLoadingImpact]     = useState(false);
-  const [loadingGenerate,  setLoadingGenerate]   = useState(false);
-  const [loadingFunctions, setLoadingFunctions]  = useState(false);
-  const [error, setError]                        = useState(null);
+  const addHistory = useCallback((type, label, detail) => {
+    setHistory(prev => [{
+      type, label, detail: detail || "",
+      time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+      id: Date.now(),
+    }, ...prev].slice(0, 30));
+  }, []);
 
-  // Stats derived from flow data
   const stats = flowData ? {
     modules:   flowData.flow?.length || 0,
-    files:     [...new Set(
-      (flowData.flow || []).flatMap(n => n.files || (n.file ? [n.file] : []))
-    )].length || 0,
-    functions: (flowData.flow || []).reduce((a, n) => {
-      if (["route","function","process","service"].includes(n.type)) return a + 1;
-      return a;
-    }, 0),
-    entries:   (flowData.flow || []).filter(n =>
-      ["entry","start","route"].includes(n.type)
-    ).length,
+    files:     [...new Set((flowData.flow || []).flatMap(n => n.files || (n.file ? [n.file] : [])))].length,
+    functions: (flowData.flow || []).filter(n => ["route","function","process","service"].includes(n.type)).length,
+    entries:   (flowData.flow || []).filter(n => ["entry","start","route"].includes(n.type)).length,
   } : null;
+
+  const repoName  = repoUrl ? repoUrl.split("/").slice(-1)[0] : null;
+  const repoOwner = repoUrl ? repoUrl.split("/").slice(-2, -1)[0] : null;
 
   const handleAnalyse = useCallback(async (url) => {
     if (!url.trim()) return;
-    setError(null); setImpactData(null); setSelectedNode(null);
-    setGenerated(null); setFunctions([]); setSelectedFn(null);
-
+    setImpactData(null); setSelectedNode(null); setGenerated(null); setFunctions([]); setSelectedFn(null);
     const cache = loadCache();
     if (cache[url]) {
       setFlowData(cache[url]); setRepoUrl(url); setActiveNav("map");
-      setChatMessages(prev => [...prev, { role: "bob", text: `Loaded cached map for ${url.split("/").slice(-1)[0]}. ${cache[url].flow?.length} nodes found. Click any node to explore.` }]);
+      setChatMessages(p => [...p, { role: "bob", text: `Loaded cached map for ${url.split("/").slice(-1)[0]}. ${cache[url].flow?.length} nodes found. Click any node to explore.` }]);
+      addHistory("repo", url.split("/").slice(-1)[0], `${cache[url].flow?.length} nodes (cached)`);
       return;
     }
-
     setLoadingMap(true);
-    setChatMessages(prev => [...prev, { role: "user", text: `Analyse ${url}` }, { role: "bob", text: "Reading the repository… this takes about 15 seconds.", loading: true }]);
-
+    setChatMessages(p => [...p, { role: "user", text: `Analyse ${url}` }, { role: "bob", text: "Reading the repository… this takes about 15 seconds.", loading: true }]);
     try {
       const data = await getFlow(url);
-      setFlowData(data); setRepoUrl(url);
-      saveCache({ ...cache, [url]: data });
-      setActiveNav("map");
-      setChatMessages(prev => prev.map(m => m.loading ? { role: "bob", text: `Done! Found ${data.flow?.length} nodes in the flow. Click any node to see functions and generate tests or docs.` } : m));
+      setFlowData(data); setRepoUrl(url); saveCache({ ...cache, [url]: data }); setActiveNav("map");
+      setChatMessages(p => p.map(m => m.loading ? { role: "bob", text: `Done! Found ${data.flow?.length} nodes. Click any node to see functions and generate tests or docs.` } : m));
+      addHistory("repo", url.split("/").slice(-1)[0], `${data.flow?.length} nodes mapped`);
     } catch {
-      setError("Could not analyse repo.");
-      setChatMessages(prev => prev.map(m => m.loading ? { role: "bob", text: "Failed to analyse. Check the URL and make sure the backend is running." } : m));
+      setChatMessages(p => p.map(m => m.loading ? { role: "bob", text: "Failed to analyse. Check the URL and make sure the backend is running." } : m));
     } finally { setLoadingMap(false); }
-  }, [repoUrl]);
+  }, [addHistory]);
 
   const handleImpact = useCallback(async () => {
     if (!repoUrl || !impactQuery.trim()) return;
     setLoadingImpact(true); setImpactData(null);
-    setChatMessages(prev => [...prev,
-      { role: "user", text: `What breaks if I change ${impactQuery}?` },
-      { role: "bob", text: "Tracing dependencies…", loading: true }
-    ]);
+    setChatMessages(p => [...p, { role: "user", text: `What breaks if I change ${impactQuery}?` }, { role: "bob", text: "Tracing dependencies…", loading: true }]);
     try {
       const data = await getImpact(repoUrl, impactQuery.trim(), impactFile.trim());
       setImpactData(data);
       const affected = data.affectedModuleIds?.length || 0;
-      setChatMessages(prev => prev.map(m => m.loading ? {
-        role: "bob",
-        text: `Impact analysis complete. ${affected} module${affected !== 1 ? "s" : ""} affected. Risk level: ${data.riskLevel?.toUpperCase()}. ${data.riskReason || ""}`,
-        impact: data,
-      } : m));
-      setActiveNav("impact");
+      addHistory("impact", impactQuery, `Risk: ${data.riskLevel?.toUpperCase()} · ${affected} affected`);
+      setChatMessages(p => p.map(m => m.loading ? { role: "bob", text: `${affected} module${affected !== 1 ? "s" : ""} affected. Risk: ${data.riskLevel?.toUpperCase()}. ${data.riskReason || ""}`, impact: data } : m));
+      setActiveNav("map");
     } catch {
-      setChatMessages(prev => prev.map(m => m.loading ? { role: "bob", text: "Impact analysis failed." } : m));
+      setChatMessages(p => p.map(m => m.loading ? { role: "bob", text: "Impact analysis failed." } : m));
     } finally { setLoadingImpact(false); }
-  }, [repoUrl, impactQuery, impactFile]);
+  }, [repoUrl, impactQuery, impactFile, addHistory]);
+
+  const handleGenerate = useCallback(async (node, mode, fnName) => {
+    if (!repoUrl || !node?.file) return;
+    setLoadingGenerate(true); setGenerated(null);
+    try {
+      const data = await generateContent(repoUrl, node.file, mode, fnName || null);
+      setGenerated(data);
+      addHistory(mode === "both" ? "generate" : mode, fnName ? `${fnName}()` : node.label, node.file || "");
+    } catch { /* silent */ }
+    finally { setLoadingGenerate(false); }
+  }, [repoUrl, addHistory]);
 
   const handleNodeClick = useCallback(async (node) => {
     setSelectedNode(node); setGenerated(null); setSelectedFn(null); setFunctions([]);
+    if (activeNav === "impact" && node.file) setImpactFile(node.file);
     if (node.file && repoUrl) {
       setLoadingFunctions(true);
       try {
         const data = await getFunctions(repoUrl, node.file);
         setFunctions(data.functions || []);
-        // Auto-generate if in tests or docs mode
-        if (autoMode && node.file) {
-          setTimeout(() => handleGenerate(node, autoMode, null), 300);
-        }
+        if (autoMode && node.file) setTimeout(() => handleGenerate(node, autoMode, null), 300);
       } catch { setFunctions([]); }
       finally { setLoadingFunctions(false); }
     }
-  }, [repoUrl, autoMode]);
+  }, [repoUrl, autoMode, activeNav, handleGenerate]);
 
-  const handleGenerate = useCallback(async (node, mode, fnName = null) => {
-    if (!repoUrl || !node?.file) return;
-    setLoadingGenerate(true); setGenerated(null);
-    try {
-      const data = await generateContent(repoUrl, node.file, mode, fnName);
-      setGenerated(data);
-    } catch { setError("Generation failed."); }
-    finally { setLoadingGenerate(false); }
-  }, [repoUrl]);
-
-  const handleChatSend = (e) => {
-    e.preventDefault();
-    if (!chatInput.trim()) return;
-    const msg = chatInput.trim();
-    setChatInput("");
-    // Check if it looks like an impact query
-    if (msg.toLowerCase().includes("break") || msg.toLowerCase().includes("change") || msg.toLowerCase().includes("impact")) {
-      const fnMatch = msg.match(/[`'"]([\w.]+)[`'"]/);
-      if (fnMatch) {
-        setImpactQuery(fnMatch[1]);
-        handleImpact();
-        return;
-      }
-    }
-    setChatMessages(prev => [...prev,
-      { role: "user", text: msg },
-      { role: "bob", text: "To analyse impact, type: what breaks if I change `functionName`? Or click any node on the map to generate tests and docs." }
-    ]);
-  };
-
-  const handleRefresh = () => {
+  const handleRefresh = useCallback(() => {
     const cache = loadCache(); delete cache[repoUrl]; saveCache(cache);
     setFlowData(null); setImpactData(null); setSelectedNode(null);
     setGenerated(null); setFunctions([]); setSelectedFn(null);
-  };
+  }, [repoUrl]);
 
-  const repoName = repoUrl ? repoUrl.split("/").slice(-1)[0] : null;
-  const repoOwner = repoUrl ? repoUrl.split("/").slice(-2, -1)[0] : null;
+  const handleChatSend = useCallback((e) => {
+    e.preventDefault();
+    if (!chatInput.trim()) return;
+    const msg = chatInput.trim(); setChatInput("");
+    setChatMessages(p => [...p, { role: "user", text: msg }, { role: "bob", text: "Try: \"what breaks if I change `functionName`?\" — or click any node on the map to generate tests and docs." }]);
+  }, [chatInput]);
+
+  const handleNavClick = useCallback((item) => {
+    setActiveNav(item.id);
+    if (item.id === "generate") setAutoMode("both"); else setAutoMode(null);
+    if (item.id === "impact") setTimeout(() => document.querySelector(".impact-input")?.focus(), 100);
+  }, []);
 
   return (
     <div className="dashboard">
-      {/* ── Left Sidebar ── */}
+      {/* ── LEFT SIDEBAR ── */}
       <aside className="sidebar">
         <div className="sidebar-brand">
           <div className="brand-icon">
@@ -190,24 +168,13 @@ export default function App() {
 
         <nav className="sidebar-nav">
           {NAV.map(item => (
-            <button
-              key={item.id}
-              className={`nav-item ${activeNav === item.id ? "active" : ""}`}
-              onClick={() => {
-                setActiveNav(item.id);
-                // Set auto-mode for tests/docs
-                if (item.id === "tests") setAutoMode("tests");
-                else if (item.id === "docs") setAutoMode("docs");
-                else setAutoMode(null);
-                // Focus impact bar
-                if (item.id === "impact") {
-                  setTimeout(() => document.querySelector(".impact-input")?.focus(), 100);
-                }
-              }}
-            >
+            <button key={item.id} className={`nav-item ${activeNav === item.id ? "active" : ""}`} onClick={() => handleNavClick(item)}>
               <span className="nav-icon">{item.icon}</span>
-              <span className="nav-label">{item.label}</span>
-              {activeNav === item.id && item.desc && <span className="nav-desc">{item.desc}</span>}
+              <div className="nav-text">
+                <span className="nav-label">{item.label}</span>
+                {activeNav === item.id && <span className="nav-desc">{item.desc}</span>}
+              </div>
+              {/* {item.id === "generate" && autoMode === "both" && <span className="nav-active-dot" />} */}
             </button>
           ))}
         </nav>
@@ -218,13 +185,7 @@ export default function App() {
               <div className="upload-title">Upload Repository</div>
               <div className="upload-sub">Connect a GitHub repo to get started</div>
               <form onSubmit={e => { e.preventDefault(); handleAnalyse(repoInput); }} className="repo-form">
-                <input
-                  className="repo-input"
-                  value={repoInput}
-                  onChange={e => setRepoInput(e.target.value)}
-                  placeholder="github.com/owner/repo"
-                  disabled={loadingMap}
-                />
+                <input className="repo-input" value={repoInput} onChange={e => setRepoInput(e.target.value)} placeholder="github.com/owner/repo" disabled={loadingMap} />
                 <button className="btn-connect" type="submit" disabled={loadingMap || !repoInput.trim()}>
                   {loadingMap ? <span className="spin" /> : "→ Analyse"}
                 </button>
@@ -243,138 +204,106 @@ export default function App() {
         </div>
       </aside>
 
-      {/* ── Main Content ── */}
+      {/* ── MAIN CONTENT ── */}
       <main className="main-content">
-        {/* Top bar */}
         <div className="topbar">
           <div className="topbar-left">
-            {repoName ? (
-              <>
-                <span className="topbar-label">Repository</span>
-                <span className="topbar-repo">{repoName}</span>
-                <span className="topbar-badge">Analysed</span>
-              </>
-            ) : (
-              <span className="topbar-label">No repository loaded</span>
-            )}
+            {repoName ? (<><span className="topbar-label">Repository</span><span className="topbar-repo">{repoName}</span><span className="topbar-badge">Analysed</span></>) : (<span className="topbar-label">No repository loaded</span>)}
           </div>
           <div className="topbar-right">
-            <div className="ibm-bob-btn">
-              <span className="ibm-bob-dot" />
-              IBM Bob
-            </div>
+            <div className="ibm-bob-btn"><span className="ibm-bob-dot" />IBM Bob</div>
           </div>
         </div>
 
-        {/* Stats row */}
         {stats && (
           <div className="stats-row">
-            {[
-              { icon: "⊞", value: stats.modules,   label: "Nodes" },
-              { icon: "◎", value: stats.files,     label: "Files" },
-              { icon: "⬡", value: stats.functions, label: "Functions" },
-              { icon: "→", value: stats.entries,   label: "Entry Points" },
-            ].map((s, i) => (
+            {[{icon:"⊞",value:stats.modules,label:"Nodes"},{icon:"◎",value:stats.files,label:"Files"},{icon:"⬡",value:stats.functions,label:"Functions"},{icon:"→",value:stats.entries,label:"Entry Points"}].map((s,i) => (
               <div key={i} className="stat-card">
                 <span className="stat-icon">{s.icon}</span>
-                <div>
-                  <div className="stat-value">{s.value}</div>
-                  <div className="stat-label">{s.label}</div>
-                </div>
+                <div><div className="stat-value">{s.value}</div><div className="stat-label">{s.label}</div></div>
               </div>
             ))}
           </div>
         )}
 
-        {/* Impact input bar */}
-        {flowData && (
+        {flowData && activeNav === "impact" && (
           <div className="impact-bar">
-            <span className="impact-bar-label">⚡ Impact Analysis</span>
-            {autoMode && <span className="auto-mode-badge">Auto-{autoMode} mode on — click any node</span>}
-            <input
-              className="impact-input"
-              value={impactQuery}
-              onChange={e => setImpactQuery(e.target.value)}
-              placeholder="Function name to analyse…"
-              onKeyDown={e => e.key === "Enter" && handleImpact()}
-            />
-            <input
-              className="impact-input file-input-sm"
-              value={impactFile}
-              onChange={e => setImpactFile(e.target.value)}
-              placeholder="file path (optional)"
-              onKeyDown={e => e.key === "Enter" && handleImpact()}
-            />
-            <button className="btn-impact-run" onClick={handleImpact} disabled={loadingImpact || !impactQuery.trim()}>
-              {loadingImpact ? <span className="spin" /> : "Analyse →"}
-            </button>
+            <div className="impact-bar-info">
+              <span className="impact-bar-label">⚡ Impact Analysis</span>
+              <span className="impact-bar-hint">What breaks if I change this function?</span>
+            </div>
+            <div className="impact-bar-inputs">
+              <div className="impact-input-group">
+                <label className="impact-input-label">Function name</label>
+                <input className="impact-input" value={impactQuery} onChange={e => setImpactQuery(e.target.value)} placeholder="e.g. predict_ad_success" onKeyDown={e => e.key === "Enter" && handleImpact()} autoFocus />
+              </div>
+              <div className="impact-input-group">
+                <label className="impact-input-label">File path (optional)</label>
+                <input className="impact-input file-input-sm" value={impactFile} onChange={e => setImpactFile(e.target.value)} placeholder="e.g. backend/ml_logic.py" onKeyDown={e => e.key === "Enter" && handleImpact()} />
+              </div>
+              <button className="btn-impact-run" onClick={handleImpact} disabled={loadingImpact || !impactQuery.trim()}>
+                {loadingImpact ? <span className="spin" /> : "Analyse →"}
+              </button>
+            </div>
+            <div className="impact-tip">💡 Click any node on the map first to auto-fill the file path</div>
           </div>
         )}
 
-        {/* Map area */}
         <div className="map-area">
-          {loadingMap && (
-            <div className="map-loading-overlay">
-              <div className="loading-spinner" />
-              <span>Bob is reading the repository…</span>
-            </div>
-          )}
+          {loadingMap && (<div className="map-loading-overlay"><div className="loading-spinner" /><span>Bob is mapping the application flow…</span></div>)}
 
-          {flowData && (
-            <FlowChart
-              nodes={flowData.flow}
-              edges={flowData.edges}
-              affectedIds={impactData?.affectedModuleIds || []}
-              selectedId={selectedNode?.id || null}
-              onNodeClick={handleNodeClick}
-              loadingImpact={loadingImpact}
-            />
-          )}
-
-          {/* Search overlay */}
           {activeNav === "search" && flowData && (
             <div className="search-overlay">
-              <input
-                className="search-box"
-                autoFocus
-                value={searchQuery}
-                onChange={e => setSearchQuery(e.target.value)}
-                placeholder="Search nodes by name or file…"
-              />
+              <input className="search-box" autoFocus value={searchQuery} onChange={e => setSearchQuery(e.target.value)} placeholder="Search nodes by name or file…" />
               <div className="search-results">
-                {flowData.flow
-                  .filter(n => !searchQuery || n.label.toLowerCase().includes(searchQuery.toLowerCase()) || (n.file||"").toLowerCase().includes(searchQuery.toLowerCase()))
-                  .map(n => (
-                    <button key={n.id} className="search-result-item" onClick={() => { handleNodeClick(n); setActiveNav("map"); }}>
-                      <span className="sr-dot" style={{ background: ["route","entry","start"].includes(n.type)?"#1D9E75":n.type==="decision"?"#BA7517":"#7F77DD" }}/>
-                      <div>
-                        <div className="sr-label">{n.label}</div>
-                        {n.file && <div className="sr-file">{n.file}</div>}
-                      </div>
-                    </button>
-                  ))
-                }
+                {(flowData.flow || []).filter(n => !searchQuery || n.label.toLowerCase().includes(searchQuery.toLowerCase()) || (n.file || "").toLowerCase().includes(searchQuery.toLowerCase())).map(n => (
+                  <button key={n.id} className="search-result-item" onClick={() => { handleNodeClick(n); setActiveNav("map"); }}>
+                    <span className="sr-dot" style={{ background: ["route","entry","start"].includes(n.type)?"#1D9E75":n.type==="decision"?"#BA7517":"#7F77DD" }} />
+                    <div><div className="sr-label">{n.label}</div>{n.file && <div className="sr-file">{n.file}</div>}</div>
+                  </button>
+                ))}
               </div>
             </div>
           )}
 
-          {/* Overview panel */}
           {activeNav === "overview" && flowData && (
             <div className="overview-panel">
               <h2 className="ov-title">Repository Overview</h2>
               <p className="ov-sub">{repoUrl}</p>
               <div className="ov-nodes">
-                {flowData.flow.map(n => (
+                {(flowData.flow || []).map(n => (
                   <div key={n.id} className="ov-node-card" onClick={() => { handleNodeClick(n); setActiveNav("map"); }}>
-                    <div className="ov-node-dot" style={{ background: ["route","entry","start"].includes(n.type)?"#1D9E75":n.type==="function"?"#7F77DD":n.type==="decision"?"#BA7517":"#378ADD" }}/>
-                    <div>
-                      <div className="ov-node-name">{n.label}</div>
-                      {n.file && <div className="ov-node-file">{n.file}</div>}
-                      {n.description && <div className="ov-node-desc">{n.description}</div>}
-                    </div>
+                    <div className="ov-node-dot" style={{ background: ["route","entry","start"].includes(n.type)?"#1D9E75":n.type==="function"?"#7F77DD":n.type==="decision"?"#BA7517":"#378ADD" }} />
+                    <div><div className="ov-node-name">{n.label}</div>{n.file && <div className="ov-node-file">{n.file}</div>}{n.description && <div className="ov-node-desc">{n.description}</div>}</div>
                     <span className="ov-node-type">{n.type}</span>
                   </div>
                 ))}
+              </div>
+            </div>
+          )}
+
+          {flowData && (
+            <FlowChart
+              nodes={flowData.flow} edges={flowData.edges}
+              affectedIds={impactData?.affectedModuleIds || []}
+              selectedId={selectedNode?.id || null}
+              onNodeClick={handleNodeClick} loadingImpact={loadingImpact}
+              showLegend={["map","impact","generate"].includes(activeNav)}
+            />
+          )}
+
+          {/* Generate mode instruction — shown when Generate is active and no node selected */}
+          {flowData && activeNav === "generate" && !selectedNode && (
+            <div className="generate-instruction">
+              <div className="gen-inst-icon">✦</div>
+              <div className="gen-inst-title">Generate Mode Active</div>
+              <div className="gen-inst-sub">Click any node on the map to automatically generate tests and documentation for that module.</div>
+              <div className="gen-inst-steps">
+                <div className="gen-inst-step"><span className="gen-step-num">1</span> Click a node</div>
+                <div className="gen-inst-arrow">→</div>
+                <div className="gen-inst-step"><span className="gen-step-num">2</span> Bob generates</div>
+                <div className="gen-inst-arrow">→</div>
+                <div className="gen-inst-step"><span className="gen-step-num">3</span> Review Tests + Docs</div>
               </div>
             </div>
           )}
@@ -383,110 +312,111 @@ export default function App() {
             <div className="map-empty">
               <div className="map-empty-grid" />
               <div className="map-empty-content">
-                <div className="map-empty-icon">
-                  <svg width="64" height="64" viewBox="0 0 64 64" fill="none">
-                    <circle cx="32" cy="32" r="30" stroke="#1e1e1c" strokeWidth="1.5"/>
-                    <circle cx="32" cy="32" r="8" fill="#1e1e1c"/>
-                    <line x1="32" y1="2"  x2="32" y2="18" stroke="#2c2c2a" strokeWidth="2" strokeLinecap="round"/>
-                    <line x1="32" y1="46" x2="32" y2="62" stroke="#2c2c2a" strokeWidth="2" strokeLinecap="round"/>
-                    <line x1="2"  y1="32" x2="18" y2="32" stroke="#2c2c2a" strokeWidth="2" strokeLinecap="round"/>
-                    <line x1="46" y1="32" x2="62" y2="32" stroke="#2c2c2a" strokeWidth="2" strokeLinecap="round"/>
-                  </svg>
-                </div>
                 <p className="map-empty-title">Paste a GitHub URL in the sidebar</p>
-                <p className="map-empty-sub">Bob will map the full runtime flow of the application</p>
+                <p className="map-empty-sub">Bob will trace the full runtime flow of the application</p>
               </div>
             </div>
           )}
         </div>
+      </main>
 
-        {/* Bottom module panel */}
+      {/* ── RIGHT SIDEBAR ── */}
+      <aside className="chat-sidebar">
         {selectedNode && (
-          <div className="module-panel">
+          <div className="gen-slide-panel">
             <GeneratePanel
-              node={selectedNode}
-              functions={functions}
-              loadingFunctions={loadingFunctions}
-              selectedFn={selectedFn}
-              onSelectFn={setSelectedFn}
-              generated={generated}
-              loading={loadingGenerate}
+              node={selectedNode} functions={functions} loadingFunctions={loadingFunctions}
+              selectedFn={selectedFn} onSelectFn={setSelectedFn}
+              generated={generated} loading={loadingGenerate}
               onGenerate={handleGenerate}
               onClose={() => { setSelectedNode(null); setFunctions([]); setSelectedFn(null); setGenerated(null); }}
               onClear={() => { setGenerated(null); setSelectedFn(null); }}
-              impactData={
-                selectedNode && impactData?.affectedModuleIds?.includes(selectedNode.id) ? impactData : null
-              }
-              inline
+              impactData={selectedNode && impactData?.affectedModuleIds?.includes(selectedNode.id) ? impactData : null}
             />
           </div>
         )}
-      </main>
 
-      {/* ── Right Chat Sidebar ── */}
-      <aside className="chat-sidebar">
-        <div className="chat-header">
-          <div className="chat-tabs">
-            <button className="chat-tab active">Ask Bob</button>
-            <button className="chat-tab">History</button>
+        <div className="chat-sidebar-inner" style={{ opacity: selectedNode ? 0 : 1, pointerEvents: selectedNode ? "none" : "auto" }}>
+          <div className="chat-header">
+            <div className="chat-tabs">
+              <button className={`chat-tab ${chatTab === "ask" ? "active" : ""}`} onClick={() => setChatTab("ask")}>Ask Bob</button>
+              <button className={`chat-tab ${chatTab === "history" ? "active" : ""}`} onClick={() => setChatTab("history")}>
+                History {history.length > 0 && <span className="history-count">{history.length}</span>}
+              </button>
+            </div>
           </div>
-        </div>
 
-        <div className="chat-messages">
-          {chatMessages.map((msg, i) => (
-            <div key={i} className={`chat-msg ${msg.role}`}>
-              {msg.role === "bob" && (
-                <div className="bob-avatar">
-                  <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
-                    <circle cx="9" cy="9" r="8" fill="rgba(55,138,221,0.2)" stroke="#378ADD" strokeWidth="1"/>
-                    <circle cx="9" cy="9" r="3" fill="#378ADD"/>
-                  </svg>
+          {chatTab === "history" ? (
+            <div className="history-panel">
+              {history.length === 0 ? (
+                <div className="history-empty">
+                  <div className="history-empty-icon">◷</div>
+                  <p>No activity yet</p>
+                  <p className="history-empty-sub">Analyse a repo to start tracking history</p>
+                </div>
+              ) : (
+                <div className="history-list">
+                  {history.map(item => (
+                    <div key={item.id} className={`history-item history-${item.type}`}>
+                      <div className="history-icon">{item.type==="repo"?"◎":item.type==="impact"?"⚡":item.type==="tests"?"⬡":item.type==="docs"?"◈":"✦"}</div>
+                      <div className="history-body">
+                        <div className="history-label">{item.label}</div>
+                        {item.detail && <div className="history-detail">{item.detail}</div>}
+                      </div>
+                      <div className="history-time">{item.time}</div>
+                    </div>
+                  ))}
                 </div>
               )}
-              <div className={`msg-bubble ${msg.role}`}>
-                {msg.loading ? (
-                  <span className="typing-dots"><span/><span/><span/></span>
-                ) : (
-                  <>
-                    <p>{msg.text}</p>
-                    {msg.impact && (
-                      <div className="impact-msg-detail">
-                        <div className="impact-msg-row">
-                          <span className="impact-msg-label" style={{color: msg.impact.riskLevel === "high" ? "#E24B4A" : msg.impact.riskLevel === "medium" ? "#EF9F27" : "#1D9E75"}}>
-                            ● Directly Affected ({msg.impact.directCallers?.length || 0})
-                          </span>
-                          {msg.impact.directCallers?.slice(0,3).map((c, ci) => (
-                            <div key={ci} className="impact-msg-file">{c.file}</div>
-                          ))}
-                        </div>
-                        {msg.impact.indirectDependents?.length > 0 && (
-                          <div className="impact-msg-row">
-                            <span className="impact-msg-label" style={{color:"#EF9F27"}}>
-                              ● Indirectly Affected ({msg.impact.indirectDependents.length})
-                            </span>
-                            {msg.impact.indirectDependents.slice(0,2).map((f, fi) => (
-                              <div key={fi} className="impact-msg-file">{f}</div>
-                            ))}
-                          </div>
-                        )}
+            </div>
+          ) : (
+            <>
+              <div className="chat-messages">
+                {chatMessages.map((msg, i) => (
+                  <div key={i} className={`chat-msg ${msg.role}`}>
+                    {msg.role === "bob" && (
+                      <div className="bob-avatar">
+                        <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+                          <circle cx="9" cy="9" r="8" fill="rgba(55,138,221,0.2)" stroke="#378ADD" strokeWidth="1"/>
+                          <circle cx="9" cy="9" r="3" fill="#378ADD"/>
+                        </svg>
                       </div>
                     )}
-                  </>
-                )}
+                    <div className={`msg-bubble ${msg.role}`}>
+                      {msg.loading ? (
+                        <span className="typing-dots"><span /><span /><span /></span>
+                      ) : (
+                        <>
+                          <p>{msg.text}</p>
+                          {msg.impact && (
+                            <div className="impact-msg-detail">
+                              <div className="impact-msg-row">
+                                <span className="impact-msg-label" style={{ color: msg.impact.riskLevel==="high"?"#E24B4A":msg.impact.riskLevel==="medium"?"#EF9F27":"#1D9E75" }}>
+                                  ● Directly Affected ({msg.impact.directCallers?.length || 0})
+                                </span>
+                                {msg.impact.directCallers?.slice(0,3).map((c,ci) => <div key={ci} className="impact-msg-file">{c.file}</div>)}
+                              </div>
+                              {msg.impact.indirectDependents?.length > 0 && (
+                                <div className="impact-msg-row">
+                                  <span className="impact-msg-label" style={{ color:"#EF9F27" }}>● Indirectly Affected ({msg.impact.indirectDependents.length})</span>
+                                  {msg.impact.indirectDependents.slice(0,2).map((f,fi) => <div key={fi} className="impact-msg-file">{f}</div>)}
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  </div>
+                ))}
               </div>
-            </div>
-          ))}
+              <form className="chat-input-row" onSubmit={handleChatSend}>
+                <input className="chat-input" value={chatInput} onChange={e => setChatInput(e.target.value)} placeholder="Ask anything about your codebase…" />
+                <button className="chat-send" type="submit" disabled={!chatInput.trim()}>→</button>
+              </form>
+            </>
+          )}
         </div>
-
-        <form className="chat-input-row" onSubmit={handleChatSend}>
-          <input
-            className="chat-input"
-            value={chatInput}
-            onChange={e => setChatInput(e.target.value)}
-            placeholder="Ask anything about your codebase…"
-          />
-          <button className="chat-send" type="submit" disabled={!chatInput.trim()}>→</button>
-        </form>
       </aside>
     </div>
   );

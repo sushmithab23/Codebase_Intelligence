@@ -11,9 +11,6 @@ function stripFences(code) {
     .trim();
 }
 
-// import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
-// import { vscDarkPlus } from "react-syntax-highlighter/dist/esm/styles/prism";
-
 const RISK_CONFIG = {
   high:   { color: "#E24B4A", bg: "#2a0808", label: "High risk" },
   medium: { color: "#EF9F27", bg: "#2e1f00", label: "Medium risk" },

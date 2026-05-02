@@ -31,6 +31,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ── Impact Analysis Cache ───────────────────────────────────
+impact_cache = {}
+
 # ── Config from .env ────────────────────────────────────────
 IBM_API_KEY    = os.getenv("IBM_API_KEY")
 IBM_PROJECT_ID = os.getenv("IBM_PROJECT_ID")
@@ -88,7 +91,8 @@ async def call_watsonx(prompt: str) -> str:
     """Send prompt to watsonx.ai Granite model and return response"""
     token = await get_iam_token()
 
-    async with httpx.AsyncClient(timeout=60) as client:
+    # Increase timeout to 120 seconds for impact analysis
+    async with httpx.AsyncClient(timeout=120) as client:
         response = await client.post(
             WATSONX_URL,
             headers={
@@ -99,8 +103,9 @@ async def call_watsonx(prompt: str) -> str:
                 "model_id": "ibm/granite-3-8b-instruct",
                 "input": prompt,
                 "parameters": {
+                    "decoding_method": "greedy",
                     "max_new_tokens": 8000,
-                    "temperature": 0.2,
+                    "temperature": 0.0,
                     "repetition_penalty": 1.1
                 },
                 "project_id": IBM_PROJECT_ID
@@ -214,7 +219,15 @@ async def analyse(req: AnalyseRequest):
 
 @app.post("/api/impact")
 async def impact(req: ImpactRequest):
+    # Define cache_key at function scope
+    cache_key = f"{req.repo_url}:{req.file_path}:{req.function_name}"
+    
     try:
+        # Check cache first
+        if cache_key in impact_cache:
+            logger.info(f"Returning cached impact for {cache_key}")
+            return impact_cache[cache_key]
+        
         logger.info(f"Impact analysis for {req.function_name} in {req.file_path}")
         owner, repo = parse_repo_url(req.repo_url)
         file_tree   = get_file_tree(owner, repo)
@@ -227,7 +240,7 @@ async def impact(req: ImpactRequest):
 
         if not response or not response.strip():
             # Return safe default if model returns empty
-            return {
+            fallback = {
                 "directCallers": [],
                 "indirectDependents": [],
                 "testsCovering": [],
@@ -235,6 +248,8 @@ async def impact(req: ImpactRequest):
                 "riskReason": "Could not trace dependencies automatically",
                 "affectedModuleIds": []
             }
+            impact_cache[cache_key] = fallback
+            return fallback
 
         clean = response.strip().replace("```json", "").replace("```", "").strip()
         
@@ -250,11 +265,15 @@ async def impact(req: ImpactRequest):
         else:
             logger.error(f"No valid JSON boundaries found. Full response: {response}")
 
-        return json.loads(clean)
+        result = json.loads(clean)
+        
+        # Cache the result before returning
+        impact_cache[cache_key] = result
+        return result
     except json.JSONDecodeError as e:
         logger.error(f"JSON parse error in impact: {e}")
         # Return safe default instead of crashing
-        return {
+        fallback = {
             "directCallers": [],
             "indirectDependents": [],
             "testsCovering": [],
@@ -262,9 +281,21 @@ async def impact(req: ImpactRequest):
             "riskReason": "Impact analysis complete — manual review recommended",
             "affectedModuleIds": []
         }
+        impact_cache[cache_key] = fallback
+        return fallback
     except Exception as e:
-        logger.error(f"Impact error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Impact error: {e}", exc_info=True)
+        # Return fallback instead of crashing
+        fallback = {
+            "directCallers": [],
+            "indirectDependents": [],
+            "testsCovering": [],
+            "riskLevel": "medium",
+            "riskReason": f"Analysis encountered an error: {str(e)[:100]}",
+            "affectedModuleIds": []
+        }
+        impact_cache[cache_key] = fallback
+        return fallback
 
 
 

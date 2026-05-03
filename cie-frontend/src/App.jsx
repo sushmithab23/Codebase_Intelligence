@@ -28,7 +28,7 @@ export default function App() {
   const [activeNav, setActiveNav]       = useState("map");
   const [chatTab, setChatTab]           = useState("ask");
   const [searchQuery, setSearchQuery]   = useState("");
-  const [autoMode, setAutoMode]         = useState(null);
+  const [autoMode]         = useState(null);
   const [impactQuery, setImpactQuery]   = useState("");
   const [impactFile, setImpactFile]     = useState("");
   const [loadingMap, setLoadingMap]     = useState(false);
@@ -145,7 +145,7 @@ export default function App() {
 
   const handleNavClick = useCallback((item) => {
     setActiveNav(item.id);
-    if (item.id === "generate") setAutoMode("both"); else setAutoMode(null);
+    // if (item.id === "generate") setAutoMode("both"); else setAutoMode(null);
     if (item.id === "impact") setTimeout(() => document.querySelector(".impact-input")?.focus(), 100);
   }, []);
 

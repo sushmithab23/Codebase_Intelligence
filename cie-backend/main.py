@@ -2,7 +2,7 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import httpx, os, json, logging, time
+import httpx, os, json, logging, time, re
 from dotenv import load_dotenv
 from github_helper import (
     parse_repo_url, get_file_tree,
@@ -54,6 +54,7 @@ class GenerateRequest(BaseModel):
     repo_url: str
     file_path: str
     mode: str  # "tests" | "docs" | "both"
+    function_name: str | None = None
 
 # ── IAM Token (cached) ──────────────────────────────────────
 _iam_token_cache = {"token": None, "expires_at": 0}
@@ -327,6 +328,22 @@ async def generate(req: GenerateRequest):
         # Cap file content — granite-3-8b has small context window
         file_content = file_content[:3000]
 
+        # Filter to specific function if selected
+        if req.function_name:
+            import re as _re2
+            patterns = [
+                rf'(def\s+{re.escape(req.function_name)}\s*\(.*?(?=\ndef\s|\nclass\s|\Z))',
+                rf'(async\s+def\s+{re.escape(req.function_name)}\s*\(.*?(?=\ndef\s|\nasync\s+def\s|\nclass\s|\Z))',
+                rf'((?:function|async function)\s+{re.escape(req.function_name)}\s*\(.*?\n\}})',
+                rf'((?:const|let|var)\s+{re.escape(req.function_name)}\s*=.*?\n\}})',
+            ]
+            for pat in patterns:
+                m = _re2.search(pat, file_content, _re2.DOTALL)
+                if m:
+                    file_content = m.group(1)[:3000]
+                    logger.info(f"Filtered to function {req.function_name}: {len(file_content)} chars")
+                    break
+
         framework = detect_test_framework(owner, repo)
         logger.info(f"Detected framework: {framework}")
 
@@ -521,46 +538,10 @@ async def get_functions(req: FunctionsRequest):
         logger.info(f"Getting functions from: {req.file_path}")
         owner, repo  = parse_repo_url(req.repo_url)
         file_content = get_file_content(owner, repo, req.file_path)
-
-        prompt = f"""Extract only the names of all functions, methods, and classes defined in this file.
-        Return ONLY a JSON array of name strings.
-        Do not include code. Do not include explanations.
-        Output format: ["name1", "name2", "name3"]
-
-        FILE: {req.file_path}
-        {file_content[:2000]}
-
-        JSON array of names:"""
-
-        response = await call_watsonx(prompt)
-        logger.info(f"Functions response: {response[:200]}")
-
-        # Try to find a JSON array anywhere in the response
-        import re
-
-        # First try: clean array match
-        match = re.search(r'\[[^\[\]]*\]', response, re.DOTALL)
-        if match:
-            try:
-                raw = match.group(0)
-                functions = json.loads(raw)
-                # Filter out anything that looks like code (keep short names only)
-                clean = [f for f in functions if isinstance(f, str) and len(f) < 60 and '\n' not in f]
-                if clean:
-                    logger.info(f"Found {len(clean)} functions")
-                    return {"functions": clean, "file_path": req.file_path}
-            except Exception:
-                pass
-
-        # Second try: extract quoted strings that look like function names
-        names = re.findall(r'"([a-zA-Z_][a-zA-Z0-9_]{1,40})"', response)
-        if names:
-            logger.info(f"Extracted {len(names)} names from response")
-            return {"functions": names, "file_path": req.file_path}
-
-        logger.warning(f"Could not extract functions from response")
-        return {"functions": [], "file_path": req.file_path}
-
+        extracted = _extract_functions({req.file_path: file_content})
+        functions = extracted.get(req.file_path, [])
+        logger.info(f"Found {len(functions)} functions in {req.file_path}")
+        return {"functions": functions, "file_path": req.file_path}
     except Exception as e:
         logger.error(f"Functions error: {e}")
         return {"functions": [], "file_path": req.file_path}

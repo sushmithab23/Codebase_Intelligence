@@ -121,25 +121,36 @@ Requirements:
 - Match the coding style of the file above"""
 
     elif mode == "docs":
-        task = """Generate inline documentation for every function and class.
+        task = """For each function and class defined in this file, write a documentation entry in this exact format:
 
-Requirements:
-- Match the existing doc style (JSDoc, docstrings, etc.)
-- Include: purpose, parameters (name + type + description), return value, raises/throws, example
-- Describe what the code DOES — not what it should do
-- Flag any functions that appear to have side effects"""
+### functionName
+**What it does:** one sentence description of purpose
+**Parameters:** param1 (type) — description | param2 (type) — description | none
+**Returns:** what it returns, or "nothing"
+**Side effects:** any mutations or I/O, or "none"
+
+List ONLY functions that are actually defined in the FILE CONTENTS above.
+Do NOT invent functions. Do NOT include require/import statements.
+Output plain text only — no code blocks, no backticks."""
 
     else:  # both
-        task = f"""Generate TWO sections:
+        task = f"""Generate TWO sections separated by a divider.
 
-1. TESTS — Complete unit test suite using {framework}
-   - Happy path, edge cases, failure scenarios
-   - Descriptive test names
-   - Comments explaining WHY each test exists
+SECTION 1 — TESTS
+Write a complete unit test suite using {framework}.
+- Happy path, edge cases, failure scenarios
+- Descriptive test names: should X when Y
+- Raw code only, no fences
 
-2. DOCS — Inline documentation for every function
-   - Parameters, return values, examples
-   - Match existing doc style"""
+--- DOCS ---
+
+SECTION 2 — DOCS
+For each function defined in the file, write:
+### functionName
+**What it does:** one sentence
+**Parameters:** param (type) — description | none
+**Returns:** description
+**Side effects:** description or none"""
 
     return f"""You are a senior engineer generating {mode} for this file.
 
@@ -152,49 +163,29 @@ FILE CONTENTS:
 TASK:
 {task}
 
-Return the generated code only.
-No explanation before or after.
-No markdown code fences.
-Just the raw code."""
+Output ONLY the result. No preamble. No markdown code fences. No explanation."""
 
-def flow_prompt(repo_url: str, file_tree: list, key_files: dict) -> str:
-    file_tree_str = "\n".join(file_tree[:30])
-    top_files = dict(list(key_files.items())[:5])
-    key_files_str = "\n\n".join([
-        f"=== {path} ===\n{content[:1000]}"
+def flow_prompt(repo_url: str, file_tree: list, key_files: dict, real_functions: dict = None) -> str:
+    top_files = dict(list(key_files.items())[:3])
+    files_str = "\n\n".join([
+        f"=== {path} ===\n{content[:300]}"
         for path, content in top_files.items()
     ])
 
-    return f"""You are analysing the runtime flow of this application: {repo_url}
+    func_hints = ""
+    if real_functions:
+        hints = []
+        for path, funcs in list(real_functions.items())[:5]:
+            if funcs:
+                hints.append(f"{path}: {', '.join(funcs[:6])}")
+        if hints:
+            func_hints = "\n\nFUNCTIONS IN CODEBASE:\n" + "\n".join(hints)
 
-FILE TREE:
-{file_tree_str}
+    return f"""Analyze this GitHub repository and map its execution flow: {repo_url}
 
-KEY FILE CONTENTS:
-{key_files_str}
+FILES:
+{files_str}{func_hints}
 
-Your task: Map the ACTUAL EXECUTION FLOW of this application.
-Show how a request or user action travels through the code from start to finish.
+Output ONLY this JSON with EXACTLY 8 nodes. Replace each label/file/description with real values from the files above. No text before or after the JSON.
 
-Think like a developer tracing a debugger:
-- Where does the application START? (main function, server startup, entry route)
-- What are the KEY USER ACTIONS or API ROUTES? (login, dashboard load, data fetch)
-- What FUNCTIONS get called in sequence?
-- Where are DECISIONS made? (auth checks, validation, conditionals)
-- Where does execution END? (response sent, error returned)
-
-Rules:
-- Maximum 12 nodes — only the most important steps
-- Show the HAPPY PATH (success flow) as the main path
-- Show key FAILURE branches at decision points
-- Use real function names and file paths from the code above
-- Every node id must be unique lowercase with underscores
-
-CRITICAL INSTRUCTIONS:
-- Output ONLY valid JSON starting with {{ and ending with }}
-- No example output, no preamble, no explanation, no markdown
-- Your response must contain exactly ONE JSON object
-- The JSON must have a "flow" array and an "edges" array
-
-The JSON structure must follow this exact format:
-{{ "flow": [ {{ "id": "string", "label": "string", "type": "start|end|route|function|decision|process", "file": "string", "description": "string" }} ], "edges": [ {{ "from": "string", "to": "string", "label": "string" }} ] }}"""
+{{"flow":[{{"id":"n1","label":"REPLACE_app_start","type":"start","file":"REPLACE_file","description":"REPLACE_desc"}},{{"id":"n2","label":"REPLACE_init","type":"function","file":"REPLACE_file","description":"REPLACE_desc"}},{{"id":"n3","label":"REPLACE_route","type":"route","file":"REPLACE_file","description":"REPLACE_desc"}},{{"id":"n4","label":"REPLACE_validate","type":"decision","file":"REPLACE_file","description":"REPLACE_desc"}},{{"id":"n5","label":"REPLACE_process","type":"function","file":"REPLACE_file","description":"REPLACE_desc"}},{{"id":"n6","label":"REPLACE_helper","type":"process","file":"REPLACE_file","description":"REPLACE_desc"}},{{"id":"n7","label":"REPLACE_respond","type":"function","file":"REPLACE_file","description":"REPLACE_desc"}},{{"id":"n8","label":"REPLACE_response_sent","type":"end","file":"REPLACE_file","description":"REPLACE_desc"}}],"edges":[{{"from":"n1","to":"n2","label":"starts"}},{{"from":"n2","to":"n3","label":"registers"}},{{"from":"n3","to":"n4","label":"calls"}},{{"from":"n4","to":"n5","label":"valid"}},{{"from":"n4","to":"n8","label":"invalid"}},{{"from":"n5","to":"n6","label":"calls"}},{{"from":"n6","to":"n7","label":"calls"}},{{"from":"n7","to":"n8","label":"returns"}}]}}"""

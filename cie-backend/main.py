@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 from github_helper import (
     parse_repo_url, get_file_tree,
     get_file_content, get_key_files,
-    detect_test_framework
+    get_flow_files, detect_test_framework
 )
 # from bob_prompts import map_prompt, impact_prompt, generate_prompt
 
@@ -300,109 +300,216 @@ async def impact(req: ImpactRequest):
 
 
 # ── Endpoint 3: Generate tests + docs ───────────────────────
+async def _call_watsonx_generate(prompt: str) -> str:
+    """watsonx call tuned for generate — shorter timeout, fewer tokens."""
+    token = await get_iam_token()
+    async with httpx.AsyncClient(timeout=60) as client:
+        resp = await client.post(
+            WATSONX_URL,
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json={
+                "model_id": "ibm/granite-3-8b-instruct",
+                "input": prompt,
+                "parameters": {"decoding_method": "greedy", "max_new_tokens": 2000, "temperature": 0.0},
+                "project_id": IBM_PROJECT_ID
+            }
+        )
+    if resp.status_code != 200:
+        raise HTTPException(status_code=resp.status_code, detail=f"watsonx error: {resp.text}")
+    return resp.json()["results"][0]["generated_text"]
+
 @app.post("/api/generate")
 async def generate(req: GenerateRequest):
     try:
         logger.info(f"Generating {req.mode} for {req.file_path}")
         owner, repo  = parse_repo_url(req.repo_url)
         file_content = get_file_content(owner, repo, req.file_path)
+        # Cap file content — granite-3-8b has small context window
+        file_content = file_content[:3000]
 
-        # Use shared detect_test_framework function (no duplication)
         framework = detect_test_framework(owner, repo)
         logger.info(f"Detected framework: {framework}")
 
-        prompt   = generate_prompt(req.file_path, file_content, req.mode, framework)
-        response = await call_watsonx(prompt)
+        def _strip_fences(text: str) -> str:
+            import re
+            return re.sub(r'```[a-zA-Z]*\n?', '', text).replace('```', '').strip()
 
-        return {
-            "code": response,
-            "framework": framework,
-            "mode": req.mode
-        }
+        if req.mode == "both":
+            tests_prompt = generate_prompt(req.file_path, file_content, "tests", framework)
+            docs_prompt  = generate_prompt(req.file_path, file_content, "docs", framework)
+            tests = _strip_fences(await _call_watsonx_generate(tests_prompt))
+            docs  = _strip_fences(await _call_watsonx_generate(docs_prompt))
+            return {"tests": tests, "docs": docs, "framework": framework, "mode": req.mode}
+        elif req.mode == "tests":
+            prompt = generate_prompt(req.file_path, file_content, "tests", framework)
+            tests  = _strip_fences(await _call_watsonx_generate(prompt))
+            return {"tests": tests, "framework": framework, "mode": req.mode}
+        else:
+            prompt = generate_prompt(req.file_path, file_content, "docs", framework)
+            docs   = _strip_fences(await _call_watsonx_generate(prompt))
+            return {"docs": docs, "framework": framework, "mode": req.mode}
     except Exception as e:
         logger.error(f"Generate error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# ── Add this to main.py ──────────────────────────────────────────────────────
-# 1. Import flow_prompt at the top:
-#    from bob_prompts import map_prompt, impact_prompt, generate_prompt, flow_prompt
-#
-# 2. Add this endpoint to main.py:
+import re as _re
+
+def _extract_functions(key_files: dict) -> dict:
+    """Extract function/class names from file contents using regex — no AI needed."""
+    patterns = [
+        r'def\s+([a-zA-Z_][a-zA-Z0-9_]+)\s*\(',           # Python def
+        r'async\s+def\s+([a-zA-Z_][a-zA-Z0-9_]+)\s*\(',   # Python async def
+        r'class\s+([a-zA-Z_][a-zA-Z0-9_]+)\s*[:\(]',      # Python/JS class
+        r'(?:function|async function)\s+([a-zA-Z_][a-zA-Z0-9_]+)\s*\(',  # JS function
+        r'(?:const|let|var)\s+([a-zA-Z_][a-zA-Z0-9_]+)\s*=\s*(?:async\s*)?\(',  # JS arrow
+        r'\.([a-zA-Z_][a-zA-Z0-9_]+)\s*=\s*function',     # Express-style: app.listen = function
+    ]
+    noise = {'if', 'for', 'while', 'return', 'try', 'catch', 'switch', 'case', 'new', 'import', 'export'}
+    result = {}
+    for path, content in key_files.items():
+        names = set()
+        for pat in patterns:
+            names.update(_re.findall(pat, content))
+        names = {n for n in names if len(n) > 2 and n not in noise and not n.startswith('_')}
+        if names:
+            result[path] = list(names)[:8]
+            logger.info(f"Found {len(names)} functions in {path}")
+    logger.info(f"Real functions found: { {k: v for k, v in result.items()} }")
+    return result
+
+
+def _build_flow_fallback(real_functions: dict, flow_files: dict) -> dict:
+    """Build 8 flow nodes ordered by execution semantics — generic for any language/framework."""
+    first_file = list(flow_files.keys())[0] if flow_files else "app"
+
+    # Generic keyword buckets — ordered by when they run in any app
+    INIT_KW     = {'init', 'setup', 'configure', 'start', 'create', 'boot', 'load', 'main', 'run', 'launch', 'connect'}
+    ROUTE_KW    = {'handle', 'route', 'dispatch', 'serve', 'listen', 'register', 'use', 'middleware'}
+    PROCESS_KW  = {'process', 'parse', 'validate', 'check', 'verify', 'compute', 'execute', 'fetch', 'get', 'analyse', 'analyze'}
+    RESPONSE_KW = {'send', 'respond', 'render', 'reply', 'write', 'emit', 'output', 'return', 'generate'}
+
+    buckets = {'init': [], 'route': [], 'process': [], 'response': [], 'other': []}
+
+    for path, funcs in real_functions.items():
+        for f in funcs:
+            fl = f.lower()
+            if any(kw in fl for kw in INIT_KW):
+                buckets['init'].append((path, f))
+            elif any(kw in fl for kw in ROUTE_KW):
+                buckets['route'].append((path, f))
+            elif any(kw in fl for kw in PROCESS_KW):
+                buckets['process'].append((path, f))
+            elif any(kw in fl for kw in RESPONSE_KW):
+                buckets['response'].append((path, f))
+            else:
+                buckets['other'].append((path, f))
+
+    # Execution order: init → route → process → other → response
+    ordered = (
+        buckets['init'][:2] +
+        buckets['route'][:2] +
+        buckets['process'][:2] +
+        buckets['other'][:1] +
+        buckets['response'][:1]
+    )
+
+    # Pad from all pairs if < 6
+    if len(ordered) < 6:
+        seen = {f for _, f in ordered}
+        for path, funcs in real_functions.items():
+            for f in funcs:
+                if f not in seen and len(ordered) < 6:
+                    ordered.append((path, f))
+                    seen.add(f)
+
+    def _node_type(func: str) -> str:
+        fl = func.lower()
+        if any(kw in fl for kw in INIT_KW):    return 'function'
+        if any(kw in fl for kw in ROUTE_KW):   return 'route'
+        if any(kw in fl for kw in PROCESS_KW): return 'process'
+        return 'function'
+
+    nodes = [{"id": "n1", "label": "App Start", "type": "start",
+               "file": first_file, "description": "Application entry point"}]
+
+    for i, (path, func) in enumerate(ordered[:6], 2):
+        nodes.append({"id": f"n{i}", "label": func, "type": _node_type(func),
+                       "file": path, "description": f"Executes {func}"})
+
+    while len(nodes) < 7:
+        nid = f"n{len(nodes) + 1}"
+        nodes.append({"id": nid, "label": "Process Step", "type": "process",
+                       "file": first_file, "description": "Processing step"})
+
+    nodes.append({"id": "n8", "label": "Response Sent", "type": "end",
+                   "file": first_file, "description": "Returns response to caller"})
+
+    edges = [{"from": f"n{i}", "to": f"n{i+1}", "label": "calls"} for i in range(1, 8)]
+    return {"flow": nodes[:8], "edges": edges}
+
 
 @app.post("/api/flow")
 async def flow(req: AnalyseRequest):
     try:
         logger.info(f"Generating flow map for: {req.repo_url}")
-        owner, repo = parse_repo_url(req.repo_url)
-        file_tree   = get_file_tree(owner, repo)
-        key_files   = get_key_files(owner, repo, file_tree)
-        prompt      = flow_prompt(req.repo_url, file_tree, key_files)
-        response    = await call_watsonx(prompt)
+        owner, repo    = parse_repo_url(req.repo_url)
+        file_tree      = get_file_tree(owner, repo)
+        flow_files     = get_flow_files(owner, repo, file_tree)
+        real_functions = _extract_functions(flow_files)
 
-        logger.info(f"Raw flow response length: {len(response)}")
-        logger.info(f"Raw flow response: {response[:300]}")
-
-        if not response or not response.strip():
-            raise ValueError("watsonx returned empty response")
-
-        # FIX: find ALL JSON objects and take the LAST one
-        # The model returns an example first, then the real answer
-        import re
-        all_matches = list(re.finditer(r'\{', response))
-        
-        # Try each JSON starting position from the END, take first valid one
         data = None
-        for match in reversed(all_matches):
-            start = match.start()
-            candidate = response[start:]
-            # Find the matching closing brace
-            depth = 0
-            end = 0
-            for i, ch in enumerate(candidate):
-                if ch == '{': depth += 1
-                elif ch == '}':
-                    depth -= 1
-                    if depth == 0:
-                        end = i + 1
-                        break
-            if end == 0:
-                continue
-            try:
-                parsed = json.loads(candidate[:end])
-                if "flow" in parsed and "edges" in parsed:
-                    data = parsed
-                    break
-            except json.JSONDecodeError:
-                continue
 
-        if not data:
-            # Last resort — try the entire response cleaned up
-            clean = response.strip()
-            start = clean.rfind('{"flow"')  # find last occurrence of flow key
-            if start == -1:
-                start = clean.rfind('{\n  "flow"')
-            if start != -1:
-                end = clean.rfind('}') + 1
-                data = json.loads(clean[start:end])
+        # Try watsonx with 30s timeout — fall back on timeout or bad response
+        try:
+            token = await get_iam_token()
+            async with httpx.AsyncClient(timeout=30) as client:
+                wx_response = await client.post(
+                    WATSONX_URL,
+                    headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                    json={
+                        "model_id": "ibm/granite-3-8b-instruct",
+                        "input": flow_prompt(req.repo_url, file_tree, flow_files, real_functions),
+                        "parameters": {"decoding_method": "greedy", "max_new_tokens": 1200, "temperature": 0.0},
+                        "project_id": IBM_PROJECT_ID
+                    }
+                )
+            response = wx_response.json()["results"][0]["generated_text"] if wx_response.status_code == 200 else ""
+            logger.info(f"Raw flow response length: {len(response)}")
 
-        if not data:
-            raise ValueError(f"Could not extract valid flow JSON from response")
+            if response and response.strip():
+                for match in reversed(list(_re.finditer(r'\{', response))):
+                    candidate = response[match.start():]
+                    depth = end = 0
+                    for i, ch in enumerate(candidate):
+                        if ch == '{': depth += 1
+                        elif ch == '}':
+                            depth -= 1
+                            if depth == 0:
+                                end = i + 1
+                                break
+                    if not end:
+                        continue
+                    try:
+                        parsed = json.loads(candidate[:end])
+                        if "flow" in parsed and "edges" in parsed and len(parsed["flow"]) >= 4:
+                            data = parsed
+                            break
+                    except json.JSONDecodeError:
+                        continue
+        except Exception as wx_err:
+            logger.warning(f"watsonx flow call failed: {wx_err} — using fallback")
+
+        if not data or len(data.get("flow", [])) < 8:
+            logger.warning(f"Using smart fallback — {len(data['flow']) if data else 0} nodes from watsonx")
+            data = _build_flow_fallback(real_functions, flow_files)
 
         logger.info(f"Flow: {len(data['flow'])} nodes, {len(data['edges'])} edges")
         return data
 
-    except json.JSONDecodeError as e:
-        logger.error(f"JSON parse error in flow: {e}")
-        raise HTTPException(status_code=500, detail=f"Invalid JSON: {str(e)}")
     except Exception as e:
         logger.error(f"Flow error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-
-# ── Add this endpoint to main.py ─────────────────────────────────────────────
-# Also add this to imports at top of file:
-#   from pydantic import BaseModel
-# (already imported — no change needed)
 
 class FunctionsRequest(BaseModel):
     repo_url: str

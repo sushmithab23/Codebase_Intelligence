@@ -69,6 +69,57 @@ def get_key_files(owner: str, repo: str, file_tree: list[str]) -> dict:
 
     return key_files
 
+ENTRY_POINT_FILES = {
+    'index.js', 'index.ts', 'index.py',
+    'main.py', 'main.js', 'main.ts',
+    'app.js', 'app.ts', 'app.py',
+    'server.js', 'server.ts', 'server.py',
+    'application.js', 'application.ts',
+    'router.js', 'router.ts',
+    'routes.js', 'routes.ts',
+}
+
+SKIP_FILES = {
+    'utils.js', 'utils.ts', 'util.js', 'util.ts',
+    'helpers.js', 'helpers.ts', 'helper.js', 'helper.ts',
+    'constants.js', 'constants.ts',
+    'types.js', 'types.ts',
+}
+
+def get_flow_files(owner: str, repo: str, file_tree: list) -> dict:
+    """Fetch entry-point files for flow analysis. Entry points first, utils last."""
+    key_extensions = ['.py', '.js', '.ts', '.jsx', '.tsx']
+    skip_folders = ['node_modules', 'venv', '__pycache__', '.git', 'build', 'dist', '.next', 'coverage', 'examples', 'example', 'test', 'tests', '__tests__', 'spec']
+
+    def file_priority(path: str) -> int:
+        name = path.split('/')[-1].lower()
+        if name in ENTRY_POINT_FILES:
+            return 0
+        if name in SKIP_FILES:
+            return 2
+        return 1
+
+    eligible = [
+        p for p in file_tree
+        if not any(skip in p for skip in skip_folders)
+        and any(p.endswith(ext) for ext in key_extensions)
+    ]
+    eligible.sort(key=file_priority)
+
+    result = {}
+    for path in eligible:
+        if len(result) >= 10:
+            break
+        try:
+            content = get_file_content(owner, repo, path)
+            result[path] = content[:5000]
+            logger.info(f"Flow file selected: {path}")
+        except Exception as e:
+            logger.warning(f"Failed to fetch {path}: {e}")
+
+    return result
+
+
 def detect_test_framework(owner: str, repo: str) -> str:
     """Detect the test framework used in the repo"""
     # Check Python

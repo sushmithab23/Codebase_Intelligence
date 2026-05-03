@@ -69,34 +69,31 @@ Click any module. Bob generates a complete, framework-matched test suite and doc
 ---
 
 ## Project Structure
-
+ 
 ```
 cie-project/
-├── .bob/
-│   └── rules.md              # Bob behaviour rules — read this first
-├── cie-frontend/             # React app
-│   ├── src/
-│   │   ├── components/
-│   │   │   ├── CodebaseMap.jsx       # D3 force-directed graph
-│   │   │   ├── ImpactOverlay.jsx     # Highlights affected modules
-│   │   │   ├── RepoInput.jsx         # GitHub URL input
-│   │   │   └── GeneratePanel.jsx     # Tests + docs output
-│   │   └── App.jsx
-│   └── package.json
-├── cie-backend/              # FastAPI backend
-│   ├── main.py               # API endpoints
-│   ├── github_helper.py      # GitHub API utilities
-│   ├── bob_prompts.py        # Bob prompt templates
+├── cie-frontend/
+│   ├── public/
+│   │   └── index.html              # CIE favicon + IBM Plex Mono font
+│   └── src/
+│       ├── components/
+│       │   ├── FlowChart.jsx       # D3 force-directed graph, file-card nodes
+│       │   └── GeneratePanel.jsx   # Function chips + tests/docs output
+│       ├── api/
+│       │   └── cie.js              # getFlow, getImpact, generateContent, getFunctions
+│       ├── App.jsx                 # Dashboard layout, all state, sidebar nav
+│       └── App.css                 # Complete dark dashboard styles
+├── cie-backend/
+│   ├── main.py                     # FastAPI endpoints: /api/flow, /impact, /generate, /functions
+│   ├── bob_prompts.py              # flow_prompt, impact_prompt, generate_prompt
+│   ├── github_helper.py            # GitHub API utilities
 │   ├── requirements.txt
-│   └── .env                  # Your secrets (never commit this!)
-├── mcp/
-│   └── bob-mcp-config.json   # MCP server configuration
-└── planning/
-    ├── MASTER-PLAN.md
-    ├── SKILLS-REFERENCE.md
-    └── QUICK-REFERENCE.md
+│   ├── .env                        # Your secrets (never commit!)
+│   └── .env.example
+└── docs/
+    └── screenshots/                # Add your demo screenshots here
 ```
-
+ 
 ---
 
 ## Getting Started
@@ -182,6 +179,45 @@ App available at: `http://localhost:3000`
 ---
 
 ## API Reference
+
+### `POST /api/flow`
+Generates the runtime flow map of the application.
+ 
+**Request:**
+```json
+{ "repo_url": "https://github.com/sushmithab23/advision" }
+```
+ 
+**Response:**
+```json
+{
+  "flow": [
+    { "id": "start_server", "label": "Start Server", "type": "start", "file": "backend/main.py", "description": "FastAPI server initialises" }
+  ],
+  "edges": [
+    { "from": "start_server", "to": "handle_request", "label": "starts" }
+  ]
+}
+```
+ 
+---
+### `POST /api/functions`
+Lists all functions defined in a file.
+ 
+**Request:**
+```json
+{
+  "repo_url": "https://github.com/sushmithab23/advision",
+  "file_path": "backend/main.py"
+}
+```
+ 
+**Response:**
+```json
+{ "functions": ["create_ad", "get_ads", "update_ad", "delete_ad"], "file_path": "backend/main.py" }
+```
+ 
+---
 
 ### `POST /api/analyse`
 Analyse a GitHub repository and return a module map.

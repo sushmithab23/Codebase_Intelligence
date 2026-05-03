@@ -35,6 +35,7 @@ export default function App() {
   const [loadingImpact, setLoadingImpact]       = useState(false);
   const [loadingGenerate, setLoadingGenerate]   = useState(false);
   const [loadingFunctions, setLoadingFunctions] = useState(false);
+  const [showImpactModal, setShowImpactModal]   = useState(false);
   const [chatMessages, setChatMessages] = useState([
     { role: "bob", text: "Hi! Paste a GitHub URL in the sidebar to get started. I'll map your entire codebase and help you understand it." }
   ]);
@@ -83,7 +84,7 @@ export default function App() {
 
   const handleImpact = useCallback(async () => {
     if (!repoUrl || !impactQuery.trim()) return;
-    setLoadingImpact(true); setImpactData(null);
+    setLoadingImpact(true); setImpactData(null); setShowImpactModal(true);
     setChatMessages(p => [...p, { role: "user", text: `What breaks if I change ${impactQuery}?` }, { role: "bob", text: "Tracing dependencies…", loading: true }]);
     try {
       const data = await getImpact(repoUrl, impactQuery.trim(), impactFile.trim());
@@ -91,7 +92,6 @@ export default function App() {
       const affected = data.affectedModuleIds?.length || 0;
       addHistory("impact", impactQuery, `Risk: ${data.riskLevel?.toUpperCase()} · ${affected} affected`);
       setChatMessages(p => p.map(m => m.loading ? { role: "bob", text: `${affected} module${affected !== 1 ? "s" : ""} affected. Risk: ${data.riskLevel?.toUpperCase()}. ${data.riskReason || ""}`, impact: data } : m));
-      // Stay on impact view so user can see results on the map
     } catch {
       setChatMessages(p => p.map(m => m.loading ? { role: "bob", text: "Impact analysis failed." } : m));
     } finally { setLoadingImpact(false); }
@@ -113,17 +113,12 @@ export default function App() {
     if (activeNav === "impact" && node.file) setImpactFile(node.file);
 
     if (node.file && repoUrl) {
-      // Skip wildcard paths — can't fetch *.js from GitHub
       const isWildcard = node.file.includes("*") || node.file.endsWith("/");
-      if (isWildcard) {
-        setFunctions([]);
-        return;
-      }
+      if (isWildcard) { setFunctions([]); return; }
 
       setLoadingFunctions(true);
       try {
         const data = await getFunctions(repoUrl, node.file);
-        // expanded_files = backend resolved a folder to real files
         if (data.expanded_files?.length > 0) {
           setFunctions(data.expanded_files);
         } else {
@@ -138,7 +133,7 @@ export default function App() {
   const handleRefresh = useCallback(() => {
     const cache = loadCache(); delete cache[repoUrl]; saveCache(cache);
     setFlowData(null); setImpactData(null); setSelectedNode(null);
-    setGenerated(null); setFunctions([]); setSelectedFn(null);
+    setGenerated(null); setFunctions([]); setSelectedFn(null); setShowImpactModal(false);
   }, [repoUrl]);
 
   const handleChatSend = useCallback((e) => {
@@ -152,6 +147,10 @@ export default function App() {
     setActiveNav(item.id);
     if (item.id === "generate") setAutoMode("both"); else setAutoMode(null);
     if (item.id === "impact") setTimeout(() => document.querySelector(".impact-input")?.focus(), 100);
+  }, []);
+
+  const closeImpactModal = useCallback(() => {
+    setShowImpactModal(false);
   }, []);
 
   return (
@@ -198,21 +197,15 @@ export default function App() {
               <div className="upload-title">Upload Repository</div>
               <div className="upload-sub">Connect a GitHub repo to get started</div>
               <form onSubmit={e => { e.preventDefault(); handleAnalyse(repoInput); }} className="repo-form">
-                {/* <input className="repo-input" value={repoInput} onChange={e => setRepoInput(e.target.value)} placeholder="github.com/owner/repo" disabled={loadingMap} /> */}
                 <input className="repo-input" value={repoInput}
                   onChange={e => {
                     setRepoInput(e.target.value);
-                    // Clear impact state immediately when user types new URL
                     if (e.target.value !== repoUrl) {
-                      setImpactQuery("");
-                      setImpactFile("");
-                      setImpactData(null);
-                      setSelectedNode(null);
-                      setGenerated(null);
+                      setImpactQuery(""); setImpactFile(""); setImpactData(null);
+                      setSelectedNode(null); setGenerated(null); setShowImpactModal(false);
                     }
                   }}
                   placeholder="github.com/owner/repo" disabled={loadingMap} />
-
                 <button className="btn-connect" type="submit" disabled={loadingMap || !repoInput.trim()}>
                   {loadingMap ? <span className="spin" /> : "→ Analyse"}
                 </button>
@@ -276,99 +269,6 @@ export default function App() {
           </div>
         )}
 
-        {/* Impact results — redesigned */}
-        {flowData && activeNav === "impact" && impactData && (
-          <div className="impact-results">
-            {/* Top summary bar */}
-            <div className="impact-summary-bar">
-              <div className={`impact-risk-pill risk-${impactData.riskLevel}`}>
-                <span className="risk-dot" />
-                {impactData.riskLevel?.toUpperCase()} RISK
-              </div>
-              <span className="impact-summary-counts">
-                <span className="ic-num ic-red">{impactData.directCallers?.length || 0}</span>
-                <span className="ic-label">direct</span>
-                <span className="ic-divider">·</span>
-                <span className="ic-num ic-amber">{impactData.indirectDependents?.length || 0}</span>
-                <span className="ic-label">indirect</span>
-                {impactData.testsCovering?.length > 0 && (<>
-                  <span className="ic-divider">·</span>
-                  <span className="ic-num ic-green">{impactData.testsCovering.length}</span>
-                  <span className="ic-label">tests</span>
-                </>)}
-              </span>
-              <span className="impact-reason-text">{impactData.riskReason}</span>
-            </div>
-
-            {/* File columns */}
-            <div className="impact-cols-row">
-              {/* Direct */}
-              <div className="impact-col">
-                <div className="impact-col-header red">
-                  <span>● DIRECTLY AFFECTED</span>
-                  <span className="col-count">{impactData.directCallers?.length || 0}</span>
-                </div>
-                <div className="impact-file-list">
-                  {impactData.directCallers?.length > 0 ? (
-                    impactData.directCallers.slice(0, 8).map((c, i) => (
-                      <div key={i} className="impact-file-item">
-                        <span className="file-dot red" />
-                        <span className="file-name">{c.file}</span>
-                        {c.line && <span className="file-line">:{c.line}</span>}
-                      </div>
-                    ))
-                  ) : (
-                    <div className="impact-empty-col">No direct callers found</div>
-                  )}
-                  {impactData.directCallers?.length > 8 && (
-                    <div className="impact-more">+{impactData.directCallers.length - 8} more files</div>
-                  )}
-                </div>
-              </div>
-
-              {/* Indirect */}
-              <div className="impact-col">
-                <div className="impact-col-header amber">
-                  <span>● INDIRECTLY AFFECTED</span>
-                  <span className="col-count">{impactData.indirectDependents?.length || 0}</span>
-                </div>
-                <div className="impact-file-list">
-                  {impactData.indirectDependents?.length > 0 ? (
-                    impactData.indirectDependents.slice(0, 8).map((f, i) => (
-                      <div key={i} className="impact-file-item">
-                        <span className="file-dot amber" />
-                        <span className="file-name">{typeof f === "string" ? f : f.file}</span>
-                      </div>
-                    ))
-                  ) : (
-                    <div className="impact-empty-col">No indirect dependents</div>
-                  )}
-                </div>
-              </div>
-
-              {/* Tests */}
-              <div className="impact-col">
-                <div className="impact-col-header green">
-                  <span>● TESTS COVERING</span>
-                  <span className="col-count">{impactData.testsCovering?.length || 0}</span>
-                </div>
-                <div className="impact-file-list">
-                  {impactData.testsCovering?.length > 0 ? (
-                    impactData.testsCovering.map((f, i) => (
-                      <div key={i} className="impact-file-item">
-                        <span className="file-dot green" />
-                        <span className="file-name">{f}</span>
-                      </div>
-                    ))
-                  ) : (
-                    <div className="impact-empty-col">No tests found</div>
-                  )}
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
-
         <div className="map-area">
           {loadingMap && (<div className="map-loading-overlay"><div className="loading-spinner" /><span>Bob is mapping the application flow…</span></div>)}
 
@@ -412,7 +312,6 @@ export default function App() {
             />
           )}
 
-          {/* Generate mode instruction — shown when Generate is active and no node selected */}
           {flowData && activeNav === "generate" && !selectedNode && (
             <div className="generate-instruction">
               <div className="gen-inst-icon">✦</div>
@@ -538,6 +437,177 @@ export default function App() {
           )}
         </div>
       </aside>
+
+      {/* ── IMPACT MODAL ── */}
+      {showImpactModal && (
+        <div className="impact-modal-overlay" onClick={(e) => e.target === e.currentTarget && closeImpactModal()}>
+          <div className="impact-modal">
+            {/* Modal Header */}
+            <div className="impact-modal-header">
+              <div className="impact-modal-title-row">
+                <span className="impact-modal-icon">⚡</span>
+                <div>
+                  <div className="impact-modal-title">Impact Analysis</div>
+                  {impactQuery && (
+                    <div className="impact-modal-subtitle">
+                      Analysing: <code className="impact-modal-fn">{impactQuery}</code>
+                      {impactFile && <span className="impact-modal-file"> · {impactFile}</span>}
+                    </div>
+                  )}
+                </div>
+              </div>
+              <button className="impact-modal-close" onClick={closeImpactModal} title="Close and view map">
+                <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                  <line x1="1" y1="1" x2="13" y2="13" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"/>
+                  <line x1="13" y1="1" x2="1" y2="13" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"/>
+                </svg>
+                <span>View Map</span>
+              </button>
+            </div>
+
+            {/* Loading state */}
+            {loadingImpact && (
+              <div className="impact-modal-loading">
+                <div className="impact-modal-spinner">
+                  <div className="imp-spin-ring" />
+                  <span className="imp-spin-icon">⚡</span>
+                </div>
+                <div className="impact-modal-loading-text">Tracing dependencies across your codebase…</div>
+                <div className="impact-modal-loading-sub">Scanning imports, call graphs, and module boundaries</div>
+              </div>
+            )}
+
+            {/* Results */}
+            {!loadingImpact && impactData && (
+              <>
+                {/* Summary bar */}
+                <div className="impact-modal-summary">
+                  <div className={`impact-modal-risk-pill risk-${impactData.riskLevel}`}>
+                    <span className="risk-dot" />
+                    {impactData.riskLevel?.toUpperCase()} RISK
+                  </div>
+                  <div className="impact-modal-counts">
+                    <span className="imc-num imc-red">{impactData.directCallers?.length || 0}</span>
+                    <span className="imc-label">direct</span>
+                    <span className="imc-div">·</span>
+                    <span className="imc-num imc-amber">{impactData.indirectDependents?.length || 0}</span>
+                    <span className="imc-label">indirect</span>
+                    {impactData.testsCovering?.length > 0 && (
+                      <>
+                        <span className="imc-div">·</span>
+                        <span className="imc-num imc-green">{impactData.testsCovering.length}</span>
+                        <span className="imc-label">tests</span>
+                      </>
+                    )}
+                  </div>
+                  {impactData.riskReason && (
+                    <div className="impact-modal-reason">{impactData.riskReason}</div>
+                  )}
+                </div>
+
+                {/* Three columns */}
+                <div className="impact-modal-cols">
+                  {/* Direct */}
+                  <div className="impact-modal-col">
+                    <div className="imc-col-header red">
+                      <div className="imc-col-title">
+                        <span className="imc-col-dot red" />
+                        DIRECTLY AFFECTED
+                      </div>
+                      <span className="imc-col-count">{impactData.directCallers?.length || 0}</span>
+                    </div>
+                    <div className="imc-col-body">
+                      {impactData.directCallers?.length > 0 ? (
+                        impactData.directCallers.map((c, i) => (
+                          <div key={i} className="imc-file-row">
+                            <span className="imc-file-dot red" />
+                            <span className="imc-file-name">{c.file}</span>
+                            {c.line && <span className="imc-file-line">:{c.line}</span>}
+                          </div>
+                        ))
+                      ) : (
+                        <div className="imc-empty">No direct callers found</div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Indirect */}
+                  <div className="impact-modal-col">
+                    <div className="imc-col-header amber">
+                      <div className="imc-col-title">
+                        <span className="imc-col-dot amber" />
+                        INDIRECTLY AFFECTED
+                      </div>
+                      <span className="imc-col-count">{impactData.indirectDependents?.length || 0}</span>
+                    </div>
+                    <div className="imc-col-body">
+                      {impactData.indirectDependents?.length > 0 ? (
+                        impactData.indirectDependents.map((f, i) => (
+                          <div key={i} className="imc-file-row">
+                            <span className="imc-file-dot amber" />
+                            <span className="imc-file-name">{typeof f === "string" ? f : f.file}</span>
+                          </div>
+                        ))
+                      ) : (
+                        <div className="imc-empty">No indirect dependents</div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Tests */}
+                  <div className="impact-modal-col">
+                    <div className="imc-col-header green">
+                      <div className="imc-col-title">
+                        <span className="imc-col-dot green" />
+                        TESTS COVERING
+                      </div>
+                      <span className="imc-col-count">{impactData.testsCovering?.length || 0}</span>
+                    </div>
+                    <div className="imc-col-body">
+                      {impactData.testsCovering?.length > 0 ? (
+                        impactData.testsCovering.map((f, i) => (
+                          <div key={i} className="imc-file-row">
+                            <span className="imc-file-dot green" />
+                            <span className="imc-file-name">{f}</span>
+                          </div>
+                        ))
+                      ) : (
+                        <div className="imc-empty">No tests found</div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Footer */}
+                <div className="impact-modal-footer">
+                  <button className="impact-modal-view-btn" onClick={closeImpactModal}>
+                    <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                      <rect x="1" y="1" width="5" height="5" rx="1" stroke="currentColor" strokeWidth="1.2"/>
+                      <rect x="8" y="1" width="5" height="5" rx="1" stroke="currentColor" strokeWidth="1.2"/>
+                      <rect x="1" y="8" width="5" height="5" rx="1" stroke="currentColor" strokeWidth="1.2"/>
+                      <rect x="8" y="8" width="5" height="5" rx="1" stroke="currentColor" strokeWidth="1.2"/>
+                    </svg>
+                    View on Map
+                  </button>
+                  <div className="impact-modal-footer-hint">
+                    Affected nodes are highlighted in red on the codebase map
+                  </div>
+                </div>
+              </>
+            )}
+
+            {/* No data state (modal opened but no results yet) */}
+            {!loadingImpact && !impactData && (
+              <div className="impact-modal-empty">
+                <div className="impact-modal-empty-icon">⚡</div>
+                <div className="impact-modal-empty-text">No results yet</div>
+                <div className="impact-modal-empty-sub">Enter a function name above and click Analyse</div>
+                <button className="impact-modal-view-btn" onClick={closeImpactModal}>← Back to Map</button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

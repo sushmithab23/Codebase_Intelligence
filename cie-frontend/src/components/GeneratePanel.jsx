@@ -159,6 +159,13 @@ export default function GeneratePanel({
         </div>
         {node.file && <span className="module-file">{node.file}</span>}
         {node.description && <p className="node-description">{node.description}</p>}
+        {node.file && (node.file.includes("*") || node.file.endsWith("/")) && (
+          <div className="wildcard-warning">
+            ⚠ This node represents multiple files ({node.file}).
+            Bob could not extract individual functions.
+            Try clicking a node with a specific file path like <code>src/app.js</code>
+          </div>
+        )}
       </div>
 
       <div className="panel-body">
@@ -184,7 +191,7 @@ export default function GeneratePanel({
                 </div>
               )}
             </div>
-            {node.file && (
+            {node.file && !node.file.includes("*") && !node.file.endsWith("/") && (
               <div className="generate-buttons">
                 <div className="gen-context-label">Generating for: <strong>{selectedFn ? `${selectedFn}()` : "entire file"}</strong></div>
                 <button className="btn-generate" onClick={() => { onGenerate(node, "tests", selectedFn); setActiveTab("tests"); }}><span className="btn-icon">⬡</span> Generate Tests</button>

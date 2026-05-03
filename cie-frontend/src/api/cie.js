@@ -38,19 +38,24 @@ export async function generateContent(repoUrl, filePath, mode = "both", function
     ...(functionName ? { function_name: functionName } : {}),
   });
 
-  if (data.mode === "tests") {
-    return { tests: data.code, docs: null, framework: data.framework };
-  } else if (data.mode === "docs") {
-    return { tests: null, docs: data.code, framework: data.framework };
-  } else {
-    const parts = data.code.split("2. DOCS");
-    if (parts.length === 2) {
-      return {
-        tests: parts[0].replace("1. TESTS", "").trim(),
-        docs:  parts[1].trim(),
-        framework: data.framework,
-      };
-    }
-    return { tests: data.code, docs: data.code, framework: data.framework };
-  }
+  // if (data.mode === "tests") {
+  //   return { tests: data.code, docs: null, framework: data.framework };
+  // } else if (data.mode === "docs") {
+  //   return { tests: null, docs: data.code, framework: data.framework };
+  // } else {
+  //   const parts = data.code.split("2. DOCS");
+  //   if (parts.length === 2) {
+  //     return {
+  //       tests: parts[0].replace("1. TESTS", "").trim(),
+  //       docs:  parts[1].trim(),
+  //       framework: data.framework,
+  //     };
+  //   }
+  //   return { tests: data.code, docs: data.code, framework: data.framework };
+  // }
+  return {
+    tests: data.tests || null,
+    docs: data.docs || null,
+    framework: data.framework,
+  };
 }

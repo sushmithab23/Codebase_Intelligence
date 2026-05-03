@@ -91,7 +91,7 @@ export default function App() {
       const affected = data.affectedModuleIds?.length || 0;
       addHistory("impact", impactQuery, `Risk: ${data.riskLevel?.toUpperCase()} · ${affected} affected`);
       setChatMessages(p => p.map(m => m.loading ? { role: "bob", text: `${affected} module${affected !== 1 ? "s" : ""} affected. Risk: ${data.riskLevel?.toUpperCase()}. ${data.riskReason || ""}`, impact: data } : m));
-      setActiveNav("map");
+      // Stay on impact view so user can see results on the map
     } catch {
       setChatMessages(p => p.map(m => m.loading ? { role: "bob", text: "Impact analysis failed." } : m));
     } finally { setLoadingImpact(false); }
@@ -111,11 +111,24 @@ export default function App() {
   const handleNodeClick = useCallback(async (node) => {
     setSelectedNode(node); setGenerated(null); setSelectedFn(null); setFunctions([]);
     if (activeNav === "impact" && node.file) setImpactFile(node.file);
+
     if (node.file && repoUrl) {
+      // Skip wildcard paths — can't fetch *.js from GitHub
+      const isWildcard = node.file.includes("*") || node.file.endsWith("/");
+      if (isWildcard) {
+        setFunctions([]);
+        return;
+      }
+
       setLoadingFunctions(true);
       try {
         const data = await getFunctions(repoUrl, node.file);
-        setFunctions(data.functions || []);
+        // expanded_files = backend resolved a folder to real files
+        if (data.expanded_files?.length > 0) {
+          setFunctions(data.expanded_files);
+        } else {
+          setFunctions(data.functions || []);
+        }
         if (autoMode && node.file) setTimeout(() => handleGenerate(node, autoMode, null), 300);
       } catch { setFunctions([]); }
       finally { setLoadingFunctions(false); }
@@ -174,7 +187,7 @@ export default function App() {
                 <span className="nav-label">{item.label}</span>
                 {activeNav === item.id && <span className="nav-desc">{item.desc}</span>}
               </div>
-              {/* {item.id === "generate" && autoMode === "both" && <span className="nav-active-dot" />} */}
+              {item.id === "generate" && autoMode === "both" && <span className="nav-active-dot" />}
             </button>
           ))}
         </nav>
@@ -185,7 +198,21 @@ export default function App() {
               <div className="upload-title">Upload Repository</div>
               <div className="upload-sub">Connect a GitHub repo to get started</div>
               <form onSubmit={e => { e.preventDefault(); handleAnalyse(repoInput); }} className="repo-form">
-                <input className="repo-input" value={repoInput} onChange={e => setRepoInput(e.target.value)} placeholder="github.com/owner/repo" disabled={loadingMap} />
+                {/* <input className="repo-input" value={repoInput} onChange={e => setRepoInput(e.target.value)} placeholder="github.com/owner/repo" disabled={loadingMap} /> */}
+                <input className="repo-input" value={repoInput}
+                  onChange={e => {
+                    setRepoInput(e.target.value);
+                    // Clear impact state immediately when user types new URL
+                    if (e.target.value !== repoUrl) {
+                      setImpactQuery("");
+                      setImpactFile("");
+                      setImpactData(null);
+                      setSelectedNode(null);
+                      setGenerated(null);
+                    }
+                  }}
+                  placeholder="github.com/owner/repo" disabled={loadingMap} />
+
                 <button className="btn-connect" type="submit" disabled={loadingMap || !repoInput.trim()}>
                   {loadingMap ? <span className="spin" /> : "→ Analyse"}
                 </button>
@@ -249,6 +276,99 @@ export default function App() {
           </div>
         )}
 
+        {/* Impact results — redesigned */}
+        {flowData && activeNav === "impact" && impactData && (
+          <div className="impact-results">
+            {/* Top summary bar */}
+            <div className="impact-summary-bar">
+              <div className={`impact-risk-pill risk-${impactData.riskLevel}`}>
+                <span className="risk-dot" />
+                {impactData.riskLevel?.toUpperCase()} RISK
+              </div>
+              <span className="impact-summary-counts">
+                <span className="ic-num ic-red">{impactData.directCallers?.length || 0}</span>
+                <span className="ic-label">direct</span>
+                <span className="ic-divider">·</span>
+                <span className="ic-num ic-amber">{impactData.indirectDependents?.length || 0}</span>
+                <span className="ic-label">indirect</span>
+                {impactData.testsCovering?.length > 0 && (<>
+                  <span className="ic-divider">·</span>
+                  <span className="ic-num ic-green">{impactData.testsCovering.length}</span>
+                  <span className="ic-label">tests</span>
+                </>)}
+              </span>
+              <span className="impact-reason-text">{impactData.riskReason}</span>
+            </div>
+
+            {/* File columns */}
+            <div className="impact-cols-row">
+              {/* Direct */}
+              <div className="impact-col">
+                <div className="impact-col-header red">
+                  <span>● DIRECTLY AFFECTED</span>
+                  <span className="col-count">{impactData.directCallers?.length || 0}</span>
+                </div>
+                <div className="impact-file-list">
+                  {impactData.directCallers?.length > 0 ? (
+                    impactData.directCallers.slice(0, 8).map((c, i) => (
+                      <div key={i} className="impact-file-item">
+                        <span className="file-dot red" />
+                        <span className="file-name">{c.file}</span>
+                        {c.line && <span className="file-line">:{c.line}</span>}
+                      </div>
+                    ))
+                  ) : (
+                    <div className="impact-empty-col">No direct callers found</div>
+                  )}
+                  {impactData.directCallers?.length > 8 && (
+                    <div className="impact-more">+{impactData.directCallers.length - 8} more files</div>
+                  )}
+                </div>
+              </div>
+
+              {/* Indirect */}
+              <div className="impact-col">
+                <div className="impact-col-header amber">
+                  <span>● INDIRECTLY AFFECTED</span>
+                  <span className="col-count">{impactData.indirectDependents?.length || 0}</span>
+                </div>
+                <div className="impact-file-list">
+                  {impactData.indirectDependents?.length > 0 ? (
+                    impactData.indirectDependents.slice(0, 8).map((f, i) => (
+                      <div key={i} className="impact-file-item">
+                        <span className="file-dot amber" />
+                        <span className="file-name">{typeof f === "string" ? f : f.file}</span>
+                      </div>
+                    ))
+                  ) : (
+                    <div className="impact-empty-col">No indirect dependents</div>
+                  )}
+                </div>
+              </div>
+
+              {/* Tests */}
+              <div className="impact-col">
+                <div className="impact-col-header green">
+                  <span>● TESTS COVERING</span>
+                  <span className="col-count">{impactData.testsCovering?.length || 0}</span>
+                </div>
+                <div className="impact-file-list">
+                  {impactData.testsCovering?.length > 0 ? (
+                    impactData.testsCovering.map((f, i) => (
+                      <div key={i} className="impact-file-item">
+                        <span className="file-dot green" />
+                        <span className="file-name">{f}</span>
+                      </div>
+                    ))
+                  ) : (
+                    <div className="impact-empty-col">No tests found</div>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
         <div className="map-area">
           {loadingMap && (<div className="map-loading-overlay"><div className="loading-spinner" /><span>Bob is mapping the application flow…</span></div>)}
 
@@ -285,7 +405,7 @@ export default function App() {
           {flowData && (
             <FlowChart
               nodes={flowData.flow} edges={flowData.edges}
-              affectedIds={impactData?.affectedModuleIds || []}
+              affectedIds={activeNav === "impact" ? (impactData?.affectedModuleIds || []) : []}
               selectedId={selectedNode?.id || null}
               onNodeClick={handleNodeClick} loadingImpact={loadingImpact}
               showLegend={["map","impact","generate"].includes(activeNav)}
